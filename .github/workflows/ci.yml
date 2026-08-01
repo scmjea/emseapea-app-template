@@ -2,6 +2,10 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+  # gitleaks-action annotates the PR, so it needs this on pull_request.
+  # Without it the secret scan fails 403 on every PR — silently, in every
+  # governed app generated from this template.
+  pull-requests: read
 jobs:
   secret-scan:
     runs-on: ubuntu-latest
