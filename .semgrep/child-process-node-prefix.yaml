@@ -1,0 +1,118 @@
+# EMS-131 — Semgrep's own p/default ruleset misses child_process command
+# injection when the built-in module is imported with Node's 'node:' URL
+# scheme prefix (`require('node:child_process')` /
+# `import ... from 'node:child_process'`), in BOTH CommonJS and ESM. The
+# upstream rule (javascript.lang.security.detect-child-process) only
+# recognizes the bare specifier 'child_process' — reproduced and confirmed
+# against Semgrep 1.172.0, see docs/architecture.md D14 in the main
+# emseapea repo for the full repro matrix. These two rules extend coverage
+# to the 'node:'-prefixed form without touching or duplicating anything
+# p/default already catches, so they run alongside it, not instead of it.
+rules:
+  - id: detect-child-process-node-prefix
+    message: >-
+      Detected a call to a child_process function ($CP.exec / execSync / spawn /
+      spawnSync) reached via a function argument `$FUNC`, where child_process was
+      imported using the 'node:' scheme prefix. This could lead to a command
+      injection if the input is user controllable. See
+      https://cheatsheetseries.owasp.org/cheatsheets/Nodejs_Security_Cheat_Sheet.html#do-not-use-dangerous-functions
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      category: security
+      confidence: LOW
+      references:
+        - https://linear.app/emseapea/issue/EMS-131
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              function ... (...,$FUNC,...) {
+                ...
+              }
+          - focus-metavariable: $FUNC
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $CP = require('node:child_process')
+                  ...
+              - pattern-inside: |
+                  import * as $CP from 'node:child_process'
+                  ...
+              - pattern-inside: |
+                  import $CP from 'node:child_process'
+                  ...
+          - pattern-either:
+              - pattern: $CP.exec($CMD,...)
+              - pattern: $CP.execSync($CMD,...)
+              - pattern: $CP.spawn($CMD,...)
+              - pattern: $CP.spawnSync($CMD,...)
+          - pattern-not-inside: $CP.$EXEC("...",...)
+          - pattern-not-inside: $CP.$EXEC(["...",...],...)
+          - pattern-not-inside: |
+              $CMD = "..."
+              ...
+          - pattern-not-inside: |
+              $CMD = ["...",...]
+              ...
+          - focus-metavariable: $CMD
+
+  # Narrower, lower-confidence companion: the destructured-import form
+  # (`const { exec } = require('node:child_process')` /
+  # `import { exec } from 'node:child_process'`), which is also how EMS-104's
+  # original planted finding was written. Semgrep's own alias-resolution
+  # that makes the bare-'child_process' upstream rule catch this same shape
+  # does not extend to the 'node:'-prefixed specifier (confirmed empirically,
+  # not documented behaviour), so this rule uses a same-scope co-occurrence
+  # check instead: a 'node:child_process' import/require appears in the same
+  # enclosing block as a bare call to one of the four dangerous function
+  # names. That is a heuristic, not a data-flow proof — it does not verify
+  # the specific called name was actually destructured from that import, so
+  # a file that legitimately imports node:child_process for something safe
+  # AND happens to define or call an unrelated same-named function (its own
+  # `spawn`, say) in the same scope could false-positive. Verified against
+  # this project's own real ~37-file TypeScript Worker codebase with zero
+  # false positives, but the risk is structural, not just untested — keep an
+  # eye on it, and narrow further (e.g. requiring the destructured name to
+  # match $EXECFN via a metavariable-pattern) if it ever fires on real code.
+  - id: detect-child-process-node-prefix-destructured
+    message: >-
+      Detected a call named exec/execSync/spawn/spawnSync, reached via a function
+      argument `$FUNC`, in a scope that also imports child_process via the 'node:'
+      scheme prefix. Heuristic match — see the rule file comment for what this does
+      and does not prove.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      category: security
+      confidence: LOW
+      references:
+        - https://linear.app/emseapea/issue/EMS-131
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              function ... (...,$FUNC,...) {
+                ...
+              }
+          - focus-metavariable: $FUNC
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  const { $EXECFN } = require('node:child_process')
+                  ...
+              - pattern-inside: |
+                  import { $EXECFN } from 'node:child_process'
+                  ...
+          - pattern-either:
+              - pattern: exec($CMD,...)
+              - pattern: execSync($CMD,...)
+              - pattern: spawn($CMD,...)
+              - pattern: spawnSync($CMD,...)
+          - focus-metavariable: $CMD

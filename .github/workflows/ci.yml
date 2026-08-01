@@ -2,6 +2,10 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+  # gitleaks-action annotates the PR, so it needs this on pull_request.
+  # Without it the secret scan fails 403 on every PR — silently, in every
+  # governed app generated from this template.
+  pull-requests: read
 jobs:
   secret-scan:
     runs-on: ubuntu-latest
@@ -18,4 +22,11 @@ jobs:
       image: semgrep/semgrep
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: semgrep scan --config p/default --error
+      # p/default plus a small custom ruleset closing a real coverage gap
+      # (EMS-131): p/default's own child_process rule misses the 'node:'
+      # URL-scheme prefix (require('node:child_process') /
+      # import ... from 'node:child_process'), in both CommonJS and ESM.
+      # See .semgrep/child-process-node-prefix.yaml for the rules and why
+      # p/javascript, p/typescript and p/security-audit were evaluated and
+      # rejected instead of this (docs/architecture.md D14, main repo).
+      - run: semgrep scan --config p/default --config .semgrep/ --error
