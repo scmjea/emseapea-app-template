@@ -30,3 +30,15 @@ jobs:
       # p/javascript, p/typescript and p/security-audit were evaluated and
       # rejected instead of this (docs/architecture.md D14, main repo).
       - run: semgrep scan --config p/default --config .semgrep/ --error
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # Node's built-in test runner. No dependencies, nothing to install, and
+      # no lockfile for a governed app to inherit and then have to maintain.
+      # EMS-181: what these cover is the on-behalf-of contract — a request
+      # that does not say who is signed in must be REFUSED, not downgraded.
+      - run: node --test
