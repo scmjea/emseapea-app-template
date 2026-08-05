@@ -13,6 +13,8 @@ emseapea provisioning broker. It comes with:
 - A worked example of an on-behalf-of call — a person reading their own Google
   Drive files — in `src/index.js`, and tests for it in `test/`. Run them with
   `npm test` (Node's own test runner; there are no dependencies to install).
+- **Sign-in with emseapea, already wired.** A person opens the app, signs in to
+  your organization's emseapea, and the app calls the gateway as *them*.
 
 Build whatever the approved intent describes. Every deploy goes through the
 emseapea deploy gate.
@@ -36,32 +38,80 @@ nothing forwarded the gateway has nobody to act as and refuses the call rather
 than substituting someone. Treat the token as opaque cargo — do not decode,
 log, store, or send it anywhere except `GATEWAY_URL`.
 
-## Where the person's token comes from — you have to do one of these
+## Where the person's token comes from — two ways, and both are built
 
-**This template relays a person token that arrives on the inbound request. It
-cannot obtain one.** A Worker has no session, and provisioning does not
-register this app as a sign-in client anywhere. The token is an OAuth access
-token issued by the emseapea control plane's own sign-in — the same kind an
-MCP client carries — and the control plane rejects it if the person's
-organization is not the one this app's handle belongs to.
-
-So for the header to carry a real person, one of these has to be true:
+The token is an OAuth access token issued by the emseapea control plane's own
+sign-in — the same kind an MCP client carries. The control plane rejects it if
+the person's organization is not the one this app's handle belongs to, so a
+borrowed token from another org buys nothing.
 
 1. **Your caller already holds one.** An agent or MCP client that has signed in
-   to emseapea sends its token to this app as `X-Emseapea-Person`. Nothing more
-   to build — this template forwards it.
-2. **Your app signs people in to emseapea itself.** Discover the endpoints at
-   `<control plane>/.well-known/oauth-authorization-server`, register as a
-   client, run the OAuth authorization-code + PKCE flow, and hold the resulting
-   token for the signed-in person. **That flow is not in this template**, and
-   nothing in emseapea sets it up for a governed app today.
+   to emseapea sends its token to this app as `X-Emseapea-Person`. Forwarded
+   as-is; nothing to build.
+2. **This app signs the person in.** A browser has no such header, so the app
+   runs the OAuth authorization-code + PKCE flow against emseapea itself and
+   keeps the token for the session. Three routes, and none of them need
+   editing:
 
-Until one of them is true, `/me/google-files` answers 401. It never falls back
-to calling as nobody in particular, and neither should anything you add.
+   | Route | What it does |
+   | --- | --- |
+   | `GET /auth/emseapea/signin` | Starts the flow. `?return_to=/some/path` comes back here afterwards. |
+   | `GET /auth/emseapea/callback` | Where emseapea returns the person. **Fixed by emseapea** — it is the only redirect URI registered for this app. Do not change the path. |
+   | `GET /auth/emseapea/signout` | Clears the session and hands the token back. |
+
+If a person has not signed in, a browser hitting `/me/google-files` is sent to
+sign in; anything else gets a 401. Neither ever falls back to calling as nobody
+in particular, and neither should anything you add.
+
+### How it works, in the order it happens
+
+1. **Discovery.** The app asks
+   `${EMSEAPEA_URL}/.well-known/oauth-authorization-server` where emseapea's
+   OAuth endpoints are. They are never written down in this repo, because this
+   repo is a copy that does not track the template — a frozen URL could never
+   be corrected; a discovery document can.
+2. **Authorize with PKCE.** The app invents a random `code_verifier`, sends
+   only its SHA-256 hash, and redirects the person to emseapea. It sends
+   `prompt=consent`, so the person is shown what they are agreeing to before
+   anything is granted — on every sign-in, deliberately.
+3. **Exchange.** emseapea returns an authorization code; the app trades it for
+   a token, presenting the original verifier. **There is no client secret**:
+   this app is registered as a *public* OAuth client and PKCE is its proof.
+   Whoever intercepts the code cannot use it without the verifier, which never
+   left the Worker.
+
+### Where the session lives, and the trade-offs
+
+A governed app is uploaded as a single ES module with plain-text variables —
+no KV, no Durable Object, no disk, no second file. The only place left to keep
+anything between requests is the person's own browser, so the token rides in a
+`__Host-`-prefixed `HttpOnly; Secure; SameSite=Lax` cookie on this app's own
+origin. What that costs:
+
+- **The cookie is not signed, and does not need to be.** A signature proves we
+  issued the value; the value is a bearer token emseapea validates on every
+  use, so a forged one is simply refused upstream. There is also no secret to
+  sign with — every variable this app gets is plain text.
+- **The token is in the browser** for as long as it is valid (about an hour).
+  `HttpOnly` keeps script out, `Secure` keeps it off plaintext HTTP, and
+  `__Host-` stops a neighbouring host on the same parent domain writing it.
+- **No refresh token.** Nothing long-lived is stored anywhere; when the token
+  expires the person signs in again — one redirect, and one consent screen.
+- **No server-side session, so no way to end one from here** beyond clearing
+  the cookie and revoking the token at sign-out.
+
+## An app with no `EMSEAPEA_CLIENT_ID` still serves
+
+Sign-in needs two variables that arrive from the deploy: `EMSEAPEA_URL` and
+`EMSEAPEA_CLIENT_ID`. An app deployed before they existed, or into an
+environment with no control plane address, does not get them — and still
+serves. It says sign-in is not configured, and carries on relaying a person
+token that arrives on the request. Nothing here fails closed on a variable it
+never got.
 
 ## This applies to repositories created from here on
 
 A repository generated from this template gets a copy of these files; it does
-not track them. Changes made here do not reach a repo that already exists —
-if this app was created before this section appeared, `src/index.js` will not
-send `X-Emseapea-Person` and you will need to add it by hand.
+not track them. Changes made here do not reach a repo that already exists — if
+this app was created before this section appeared, `src/index.js` will not sign
+anybody in, and you will need to copy the current template by hand.
