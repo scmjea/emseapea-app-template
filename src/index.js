@@ -117,7 +117,14 @@ const SIGNOUT_PATH = '/auth/emseapea/signout';
  * neighbour would otherwise be able to plant a session on this app.
  */
 const PERSON_COOKIE = '__Host-emseapea_person';
-/** The in-flight sign-in: the PKCE verifier and the CSRF state. Short-lived. */
+/**
+ * The in-flight sign-in: the PKCE verifier and the CSRF state. Short-lived.
+ *
+ * ONE at a time, which is the cost of having nowhere but a cookie to keep it:
+ * starting a second sign-in in another tab overwrites the first, and the first
+ * tab's callback is then refused as not having come from here. The person
+ * signs in again. Storing several would mean a store this app does not have.
+ */
 const FLOW_COOKIE = '__Host-emseapea_flow';
 const FLOW_TTL_SECONDS = 600;
 
