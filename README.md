@@ -1,10 +1,17 @@
 # A governed emseapea app
 
 <!--
-  NO PLACEHOLDERS IN THIS FILE. This heading used to read `{{APP_NAME}}` and
-  nothing ever substituted it, so every repository provisioned from this
-  template shipped with the literal braces as the first line of the first file
-  a builder opens.
+  NO PLACEHOLDERS IN THIS FILE — not in the heading, and not in here either.
+
+  The heading used to name the app through a double-brace token, and nothing
+  ever substituted it, so every repository provisioned from this template
+  shipped with the literal braces as the first line of the first file a builder
+  opens.
+
+  The token is DESCRIBED rather than shown, on purpose. Emseapea's template
+  check reads this whole file and fails on the shape, wherever it appears —
+  including inside a comment like this one. It found the first draft of this
+  comment, which quoted the token it was warning about, and it was right to.
 
   Nothing CAN substitute it, and that is the part worth keeping in mind before
   reintroducing one. A generated repository is created with GitHub's
