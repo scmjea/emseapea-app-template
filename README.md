@@ -1,4 +1,23 @@
-# {{APP_NAME}} — a governed emseapea app
+# A governed emseapea app
+
+<!--
+  NO PLACEHOLDERS IN THIS FILE. This heading used to read `{{APP_NAME}}` and
+  nothing ever substituted it, so every repository provisioned from this
+  template shipped with the literal braces as the first line of the first file
+  a builder opens.
+
+  Nothing CAN substitute it, and that is the part worth keeping in mind before
+  reintroducing one. A generated repository is created with GitHub's
+  `POST /generate`, which copies this tree verbatim; the provisioning broker
+  then WRITES `CONNECTORS.md` and `emseapea.json` into it. Those two carry the
+  app's name because they are written from scratch. This file is not written,
+  it is copied — and the broker's `writeFile` sends no blob `sha`, so it cannot
+  update a path that already exists here even if somebody taught it to try.
+
+  So: this file describes the TEMPLATE, in words that are true of every app
+  generated from it. Anything that has to name one app belongs in
+  `CONNECTORS.md`, which already opens with it.
+-->
 
 This repository was created from your organization's approved template by the
 emseapea provisioning broker. It comes with:
