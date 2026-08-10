@@ -422,6 +422,101 @@ function wantsHtml(request) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// "You need a … account to see this" — and the step that sentence cannot know
+// about
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The systems a person can link to emseapea THEMSELVES.
+ *
+ * A list rather than a boolean, and a short one, because the answer differs by
+ * vendor and getting it wrong points somebody at a page that refuses them.
+ * Microsoft's person-scoped access is a refresh token each person grants for
+ * their own account, so there is a one-time step they can take. Google's is a
+ * signed assertion from a domain-wide delegation an administrator sets up:
+ * there is nothing for a person to press, and offering them a link would be
+ * this app inventing a control that does not exist.
+ *
+ * emseapea's `/api/connect/:system/start` refuses anything not in this set
+ * with a 400, so a link built for another system is a link that fails.
+ */
+const CONNECTABLE_SYSTEMS = new Set(['msgraph']);
+
+/**
+ * Where a person links their own account, or `undefined` when no honest link
+ * can be built.
+ *
+ * ON THE CONTROL PLANE, NOT HERE, and that is the point rather than an
+ * implementation detail. This app never sees a vendor password: emseapea runs
+ * the OAuth flow, keeps the refresh token, and the gateway mints from it. The
+ * most this app can do about somebody who has not connected yet is SEND THEM
+ * TO THE RIGHT PLACE — which is more than it was doing.
+ *
+ * `undefined` rather than a guessed origin when `EMSEAPEA_URL` is absent: an
+ * app deployed without it cannot know, and a link that goes somewhere wrong is
+ * worse than no link — the person reports a broken link instead of the missing
+ * configuration that actually caused it.
+ *
+ * `returnTo` is where emseapea sends them back to. It is checked over there
+ * against the origins emseapea has deployed this organisation's apps to, and
+ * refused otherwise, so a forged `Host` header produces a refusal rather than
+ * a redirect somewhere else. That is the same bargain `callbackUriFor` makes
+ * for sign-in, and it is why this is safe to build from the request.
+ */
+export function connectUrl(env, system, returnTo) {
+  if (!env?.EMSEAPEA_URL) return undefined;
+  if (!CONNECTABLE_SYSTEMS.has(String(system ?? ''))) return undefined;
+  let url;
+  try {
+    // Built against EMSEAPEA_URL as a base, so a trailing slash on the
+    // variable cannot become a doubled one in the path.
+    url = new URL(`/api/connect/${encodeURIComponent(String(system))}/start`, env.EMSEAPEA_URL);
+  } catch {
+    return undefined;
+  }
+  if (returnTo) url.searchParams.set('return_to', returnTo);
+  return url.toString();
+}
+
+/**
+ * What a person with no connection is answered with.
+ *
+ * THE GATEWAY'S SENTENCE IS KEPT, VERBATIM AND FIRST. It is written for the
+ * person to read and CONNECTORS.md says to render it as it is; replacing it
+ * with our own wording would be this app deciding it knows better about
+ * somebody else's account.
+ *
+ * What is ADDED is the reading that sentence cannot make. *"Ask your IT team"*
+ * is right for somebody who genuinely has no account, and wrong for somebody
+ * who has one and has simply never linked it — the far more common case, and
+ * one they can fix themselves in a click. Both are offered, in that order,
+ * without claiming to know which applies.
+ *
+ * DELIBERATELY NOT PROMISED: that the link will work. If the organisation has
+ * not finished its Microsoft app registration, emseapea says so at that page —
+ * at which point "ask your IT team" was right after all, and the person has
+ * something specific to ask for.
+ */
+export function noAccountAnswer(body, request, env) {
+  const said = { message: body?.message };
+  const url = connectUrl(env, body?.system, new URL(request.url).toString());
+  if (!url) return said;
+  return {
+    ...said,
+    connect: {
+      url,
+      /** Rendered next to the link. Says what the link is FOR, and what it is
+       *  not: this app is not asking for a password and never sees one. */
+      why:
+        'You may already have an account and simply never have linked it to emseapea. ' +
+        'Linking is a one-time step, you do it on emseapea, and this app never sees your ' +
+        'password. If that page says connecting is not set up yet, your organisation has not ' +
+        'finished its registration — that is the thing to ask your IT team for.',
+    },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Worked example
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -468,7 +563,7 @@ export async function myGoogleFiles(request, env) {
   // with a 200 and something to render — a fact about the person, not an
   // error — so show the message as it is rather than making it a 403.
   if (body?.ok === false && body.outcome === 'no_account') {
-    return json({ message: body.message }, 200);
+    return json(noAccountAnswer(body, request, env), 200);
   }
   if (!res.ok) {
     return json({ error: 'Could not read from Google right now.' }, res.status);

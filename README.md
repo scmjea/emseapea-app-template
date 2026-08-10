@@ -126,6 +126,39 @@ origin. What that costs:
 - **No server-side session, so no way to end one from here** beyond clearing
   the cookie and revoking the token at sign-out.
 
+## "You need a … account to see this. Ask your IT team."
+
+Signing in to emseapea is **not** the same as linking a vendor account, and
+this is the step almost everyone misses first.
+
+This app never sees a vendor password. emseapea runs the vendor's OAuth flow,
+keeps the refresh token, and the gateway mints from it — so somebody who has
+signed in to emseapea but never linked their Microsoft account has nothing for
+the gateway to act as, and it answers `no_account`. That is what the message
+above means, and it is why `noAccountAnswer` keeps the gateway's sentence
+verbatim and adds the one thing that sentence cannot know: whether this is a
+person with no account, or a person who has one and never linked it.
+
+The link goes to `{EMSEAPEA_URL}/api/connect/msgraph/start`, with
+`?return_to=` set to the page they were on, so they come back here rather than
+being left in emseapea. emseapea checks that address against the origins it has
+deployed your organization's apps to and refuses anything else.
+
+Two things it deliberately does not do:
+
+- **It builds no link at all without `EMSEAPEA_URL`.** A link that goes
+  somewhere wrong gets reported as a broken link instead of as the missing
+  configuration behind it.
+- **It promises nothing about the link working.** If your organization has not
+  finished its Microsoft app registration, that page says so — and *that* is
+  the case where "ask your IT team" was right after all, with something
+  specific to ask for.
+
+Only Microsoft is offered, because it is the only system where linking is a
+person's own one-time step. Google Workspace access comes from a domain-wide
+delegation an administrator sets up: there is nothing there for a person to
+press, and emseapea's connect route refuses any other system.
+
 ## An app with no `EMSEAPEA_CLIENT_ID` still serves
 
 Sign-in needs two variables that arrive from the deploy: `EMSEAPEA_URL` and
