@@ -77,12 +77,26 @@
  * SameSite=Lax` cookie on this app's own origin, and the app holds no session
  * store at all. The trade-offs, stated rather than assumed:
  *
- *   - **The cookie is NOT signed, and does not need to be.** A signature would
- *     prove we issued the value; the value is a bearer token the control plane
- *     validates on every use, so a forged one is simply an invalid token and
- *     is refused upstream. There is also no secret to sign with — every
- *     binding this app gets is plain text — so a "signed" cookie here would
- *     have meant inventing a key with nowhere to keep it.
+ *   - **The cookie is NOT signed, and this app does not rely on it being
+ *     trustworthy.** A signature would prove we issued the value, and there is
+ *     no secret to sign with in any case — every binding this app gets is plain
+ *     text, so a "signed" cookie here would have meant inventing a key with
+ *     nowhere to keep it. What replaces the signature is a CHECK: the value is
+ *     an emseapea access token, and this app asks emseapea whose it is before
+ *     acting on it. See VERIFYING THE VIEWER below.
+ *
+ *     This paragraph used to end *"the value is a bearer token the control
+ *     plane validates on every use, so a forged one is simply an invalid token
+ *     and is refused upstream"*. That is TRUE OF ONE KIND OF APP and was
+ *     written by somebody thinking about that kind: an app that reaches its
+ *     system as the signed-in person forwards the token on every call, so the
+ *     gateway refuses a forged one and the app gets its session checked for
+ *     free. **It is false of an app that reaches its system through an account
+ *     its organisation prepared.** That app forwards nothing the gateway
+ *     inspects, so nothing anywhere validated its session — and it is exactly
+ *     the app that shows people data they cannot otherwise reach. A true
+ *     sentence doing duty for a different one, in the security layer, in code
+ *     that is copied into every app this product generates.
  *   - **The token is in the browser.** Anything that can read cookies on this
  *     origin can act as the person for up to an hour. `HttpOnly` keeps script
  *     out, `Secure` keeps it off plaintext HTTP, and the `__Host-` prefix stops
@@ -94,6 +108,49 @@
  *     here.** Signing out clears the cookie and hands the token back to the
  *     control plane's revocation endpoint, which is as close to a server-side
  *     session as an app with no storage can get.
+ *
+ * ---------------------------------------------------------------------------
+ * VERIFYING THE VIEWER. This is the front door, and it locks.
+ * ---------------------------------------------------------------------------
+ * `__Host-` and `HttpOnly` are instructions to a BROWSER. They stop a script
+ * and a neighbouring host; they mean nothing at all to an HTTP client, which
+ * can send whatever cookie header it likes:
+ *
+ *     curl -H 'Cookie: __Host-emseapea_person=anything' https://<this app>/
+ *
+ * So before this app treats anybody as signed in, it asks emseapea whose token
+ * that is, at the `userinfo_endpoint` named in the discovery document. That
+ * endpoint authenticates with the TOKEN ITSELF — the app presents it as a
+ * Bearer and gets back the person, or a 401 — which is what makes it usable
+ * from an app with no client secret. It is not the gateway: your app's own
+ * data path does not go through the gateway when it reaches a system through a
+ * prepared account, so a check that needed the gateway would not be available
+ * to the app that needs it most.
+ *
+ * THREE ANSWERS, NOT TWO, and keeping them apart is the point:
+ *
+ *   verified      emseapea named a person. Serve.
+ *   refused       emseapea said the token is no good. Refuse, and clear the
+ *                 cookie so the browser stops sending a dead one.
+ *   cannot_check  nobody answered — this app has no EMSEAPEA_URL, or the
+ *                 control plane is unreachable. **REFUSE.** *We could not
+ *                 check* is not *it is fine*, and an app that served on the
+ *                 second reading would be an app whose front door opens
+ *                 whenever emseapea has an outage.
+ *
+ * That last one is a DELIBERATE behaviour change and it has a cost. An app
+ * that was never handed EMSEAPEA_URL used to relay a person token that arrived
+ * on the request; it now refuses one, because it cannot tell whether the token
+ * is real and cannot tell whether anything downstream will check. It still
+ * SERVES — the home page still answers, and says what is missing.
+ *
+ * WHAT THIS COSTS ON EVERY REQUEST: two calls to emseapea, the discovery
+ * document and then userinfo. Not cached, for the same reason
+ * `discoverEndpoints` is not: there is nowhere to keep a cache in an app with
+ * no storage, and a cached "this token is good" is a session store with none of
+ * the ability to end a session. If that cost matters for your app, the answer
+ * is to verify once per request at the front door — which is what the handler
+ * at the bottom of this file does — and not to skip it.
  */
 
 /** Lower-case because `Headers` lookups are case-insensitive either way, and
@@ -134,8 +191,15 @@ export function signInConfigured(env) {
 }
 
 /**
- * The signed-in person's token: the inbound header first, then this app's own
- * session cookie.
+ * The token this request CLAIMS to carry: the inbound header first, then this
+ * app's own session cookie.
+ *
+ * **A claim, and not yet a person.** Both sources are attacker-controlled — a
+ * header is whatever the caller typed, and `__Host-` and `HttpOnly` constrain a
+ * browser and mean nothing to an HTTP client. Nothing in this app may treat a
+ * value from here as a signed-in person; `verifyViewer` is what turns one into
+ * that, and it is the only thing that may. This function used to be called
+ * *"the signed-in person's token"*, which is how it came to be trusted.
  *
  * Header first so an agent or MCP client that already holds a token keeps
  * working exactly as it did before this app could sign anyone in — an explicit
@@ -198,7 +262,76 @@ export async function discoverEndpoints(env, fetchImpl = fetch) {
     token: String(meta.token_endpoint),
     // Optional (RFC 7009). Used on sign-out when the control plane offers it.
     revocation: meta.revocation_endpoint ? String(meta.revocation_endpoint) : undefined,
+    /**
+     * Optional in the same sense, and load-bearing in a different one: this is
+     * what `verifyViewer` needs, and an app that cannot find it cannot check
+     * who is looking. Its ABSENCE is therefore not "carry on without it" — see
+     * `verifyViewer`, which answers `cannot_check` and refuses.
+     *
+     * Read from the document rather than assembled from `EMSEAPEA_URL` for the
+     * reason every other endpoint here is: this file is a copy that can never
+     * be corrected, and a path frozen into it outlives the deployment it was
+     * true of.
+     */
+    userinfo: meta.userinfo_endpoint ? String(meta.userinfo_endpoint) : undefined,
   };
+}
+
+/**
+ * WHO IS LOOKING — asked of emseapea, not of the cookie.
+ *
+ * The one function that decides whether a request carries a real person, and
+ * the only place in this file that is allowed to conclude one does. Read the
+ * VERIFYING THE VIEWER block at the top before changing it.
+ *
+ * Answers one of four outcomes and never throws: a front door that can throw is
+ * a front door that a 500 opens.
+ *
+ *   anonymous     no token was presented at all.
+ *   verified      emseapea named the person behind the token.
+ *   refused       emseapea would not — expired, revoked, or never real.
+ *   cannot_check  nobody could be asked.
+ *
+ * `person` is emseapea's answer, unmodified: `sub`, `email`, `email_verified`
+ * and `name`. It says WHO, and deliberately not what they may do — that is a
+ * different question with a different answer, and this app must not infer one
+ * from the other.
+ */
+export async function verifyViewer(request, env, fetchImpl = fetch) {
+  const token = personTokenFrom(request);
+  if (!token) return { outcome: 'anonymous' };
+  if (!env?.EMSEAPEA_URL) {
+    // Nothing to ask. Not a verification that passed by default.
+    return { outcome: 'cannot_check', why: 'this app was not given EMSEAPEA_URL' };
+  }
+  let endpoints;
+  try {
+    endpoints = await discoverEndpoints(env, fetchImpl);
+  } catch {
+    return { outcome: 'cannot_check', why: 'emseapea’s discovery document could not be read' };
+  }
+  if (!endpoints.userinfo) {
+    return { outcome: 'cannot_check', why: 'emseapea named no userinfo endpoint' };
+  }
+  let res;
+  try {
+    res = await fetchImpl(endpoints.userinfo, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+  } catch {
+    return { outcome: 'cannot_check', why: 'emseapea could not be reached' };
+  }
+  // 401 is emseapea saying the token is no good, and it is the ONLY status that
+  // means that. A 500 or a 502 is emseapea failing to answer, and reading it as
+  // "not signed in" would sign everybody out during an outage — while reading
+  // it as "signed in" would open the door during one. Neither: `cannot_check`.
+  if (res.status === 401) return { outcome: 'refused' };
+  if (!res.ok) return { outcome: 'cannot_check', why: `emseapea answered ${res.status}` };
+  const person = (await res.json().catch(() => undefined)) ?? {};
+  if (!person.sub) {
+    return { outcome: 'cannot_check', why: 'emseapea named nobody' };
+  }
+  return { outcome: 'verified', token, person };
 }
 
 /**
@@ -528,8 +661,19 @@ export function noAccountAnswer(body, request, env) {
  * decides what that person may see. Swap `google` and the path for any other
  * system listed in this repo's CONNECTORS.md.
  */
-export async function myGoogleFiles(request, env) {
-  const personToken = personTokenFrom(request);
+export async function myGoogleFiles(request, env, seen) {
+  /**
+   * `seen` is passed in by the handler at the bottom, which has already run the
+   * front door for this request. It is OPTIONAL, and this function verifies for
+   * itself when it is absent — on purpose, and it is the more important half of
+   * the argument. This route is the thing a builder copies to write their own,
+   * and a copy that only checks the viewer because something ELSE remembered to
+   * is a copy that stops checking the moment it is pasted somewhere new.
+   */
+  const viewer = seen ?? (await verifyViewer(request, env));
+  const refusal = refuseUnverified(viewer);
+  if (refusal) return refusal;
+  const personToken = viewer.outcome === 'verified' ? viewer.token : undefined;
   if (!personToken) {
     // A browser that has not signed in is SENT to sign in. The gateway is
     // still not called — a redirect is not a weaker request, it is no request.
@@ -571,9 +715,51 @@ export async function myGoogleFiles(request, env) {
   return json(body ?? {}, 200);
 }
 
+/**
+ * THE REFUSAL, when there is one. `undefined` means carry on.
+ *
+ * Separate from `verifyViewer` so that establishing a fact and acting on it are
+ * two functions rather than one — the check is reusable, and a route with a
+ * different policy can have one without reimplementing the check.
+ *
+ * Anonymous is NOT refused here. Not everything an app serves is private, and a
+ * front door that 401'd a visitor who presented nothing would refuse its own
+ * home page. What is refused is a session this app could not stand behind.
+ */
+function refuseUnverified(seen) {
+  if (seen.outcome === 'verified' || seen.outcome === 'anonymous') return undefined;
+  if (seen.outcome === 'refused') {
+    // The cookie goes with the refusal. It is dead — emseapea has just said so —
+    // and leaving it in place means the browser presents it again on every
+    // request from here until it expires.
+    const headers = new Headers();
+    clearCookie(headers, PERSON_COOKIE);
+    return page(
+      headers,
+      401,
+      'That sign-in is no longer good. Emseapea does not recognise it — it may have expired, ' +
+        'been signed out, or never have been real.\n\n' +
+        `GET ${SIGNIN_PATH} to sign in again.`,
+    );
+  }
+  /**
+   * `cannot_check`, and it is a 503 rather than a 401 because the distinction
+   * is the whole reason this outcome exists. A 401 would tell the person their
+   * sign-in is bad, which nobody established; a 200 would show them data on the
+   * strength of a session nothing verified. `seen.why` is this file's own text
+   * — never a message from anywhere else — so it is safe to render.
+   */
+  return page(
+    new Headers(),
+    503,
+    'This app cannot check who is signed in right now, so it is not showing anything: ' +
+      `${seen.why}.\n\nThat is not a problem with your sign-in. Try again shortly.`,
+  );
+}
+
 /** The front page: whichever of the three states this app is actually in. */
-function home(request, env) {
-  const signedIn = Boolean(cookieValue(request, PERSON_COOKIE));
+function home(request, env, seen) {
+  const signedIn = seen?.outcome === 'verified';
   if (!signInConfigured(env)) {
     // AC3: an app deployed before sign-in existed, or into an environment with
     // no control plane, SERVES. It just cannot sign anybody in.
@@ -622,8 +808,22 @@ export default {
         if (pathname === CALLBACK_PATH) return await completeSignIn(request, env);
         return await signOut(request, env);
       }
-      if (pathname === '/me/google-files') return await myGoogleFiles(request, env);
-      return home(request, env);
+      /**
+       * THE FRONT DOOR (EMS-324). Once, here, for every route that is not part
+       * of signing in — those three cannot go through it, because the callback
+       * is where a session comes into existence and sign-out has to work on a
+       * session emseapea has already stopped recognising.
+       *
+       * Before this existed, every route in this file read the cookie and
+       * believed it. `curl -H 'Cookie: __Host-emseapea_person=anything'` was a
+       * signed-in request, and in an app reaching its system through a prepared
+       * account that is the whole of the data.
+       */
+      const seen = await verifyViewer(request, env);
+      if (pathname === '/me/google-files') return await myGoogleFiles(request, env, seen);
+      const refusal = refuseUnverified(seen);
+      if (refusal) return refusal;
+      return home(request, env, seen);
     } catch (e) {
       return json({ error: e instanceof Error ? e.message : 'Something went wrong.' }, 500);
     }

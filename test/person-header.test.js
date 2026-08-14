@@ -7,22 +7,62 @@
  */
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import worker, { personTokenFrom, callGateway, connectUrl } from '../src/index.js';
+import worker, {
+  personTokenFrom,
+  callGateway,
+  connectUrl,
+  noAccountAnswer,
+} from '../src/index.js';
 
 // Obvious placeholders. Nothing here is, or resembles, a real credential.
 const ENV = {
   GATEWAY_URL: 'https://gateway.example/',
   CREDENTIAL_HANDLE: 'placeholder-app-handle-not-a-real-one',
+  /**
+   * EMS-324. These two are here now, and every test below that expects a
+   * gateway call needs them: this app no longer acts on a person token until
+   * emseapea has confirmed it, and an app with no `EMSEAPEA_URL` has nowhere to
+   * ask. That is deliberate — *we could not check* is not *it is fine* — and it
+   * means the version of this file that ran before the front door existed was
+   * proving the gateway call shape on a person nothing had ever verified.
+   */
+  EMSEAPEA_URL: 'https://control-plane.example',
+  EMSEAPEA_CLIENT_ID: 'placeholder-client-id-not-a-real-one',
 };
 const PERSON = 'placeholder-person-token-not-a-real-one';
 
-/** Every gateway call the code under test made. */
+const DISCOVERY = 'https://control-plane.example/.well-known/oauth-authorization-server';
+const USERINFO = 'https://endpoints.example/api/auth/mcp/userinfo';
+
+/** Every gateway call the code under test made. The viewer check is not one —
+ *  it goes to emseapea, not to the gateway, which is EMS-324 AC3 — so it is
+ *  deliberately not counted here and the assertions below are unchanged. */
 let calls = [];
 const realFetch = globalThis.fetch;
 
+/**
+ * The gateway, and behind it just enough of emseapea for the front door to get
+ * an answer: a discovery document naming `userinfo`, and a `userinfo` that
+ * knows exactly one token.
+ */
 function stubGateway(response) {
   globalThis.fetch = async (url, init) => {
-    calls.push({ url: String(url), headers: new Headers(init?.headers) });
+    const href = String(url);
+    const headers = new Headers(init?.headers);
+    if (href === DISCOVERY) {
+      return jsonResponse({
+        issuer: ENV.EMSEAPEA_URL,
+        authorization_endpoint: 'https://endpoints.example/api/auth/mcp/authorize',
+        token_endpoint: 'https://endpoints.example/api/auth/mcp/token',
+        userinfo_endpoint: USERINFO,
+      });
+    }
+    if (href === USERINFO) {
+      return (headers.get('authorization') ?? '') === `Bearer ${PERSON}`
+        ? jsonResponse({ sub: 'usr_placeholder', email: 'someone@example.test' })
+        : jsonResponse({ error: 'invalid_token' }, 401);
+    }
+    calls.push({ url: href, headers });
     return response();
   };
 }
@@ -96,11 +136,19 @@ test('no account in the system is rendered, not raised as an error', async () =>
 // gateway cannot tell the two apart: it knows there is nothing to act as, not
 // why. So the app offers both readings, and the gateway's sentence is kept.
 
-/** The two variables an app is given when emseapea can sign people in. */
-const WITH_CONTROL_PLANE = {
-  ...ENV,
-  EMSEAPEA_URL: 'https://control-plane.example',
-  EMSEAPEA_CLIENT_ID: 'placeholder-client-id-not-a-real-one',
+/**
+ * The two variables an app is given when emseapea can sign people in. They are
+ * in `ENV` itself since EMS-324 — the front door needs somewhere to ask — so
+ * this is now the same object, kept under its own name because the tests below
+ * are about what having a control plane MEANS for the connect link, and reading
+ * `WITH_CONTROL_PLANE` at the call site is the point being made.
+ */
+const WITH_CONTROL_PLANE = { ...ENV };
+
+/** An app that was never given emseapea's address. */
+const WITHOUT_CONTROL_PLANE = {
+  GATEWAY_URL: ENV.GATEWAY_URL,
+  CREDENTIAL_HANDLE: ENV.CREDENTIAL_HANDLE,
 };
 
 test('a Microsoft no-account answer keeps the sentence and adds the link', async () => {
@@ -127,16 +175,36 @@ test('a Microsoft no-account answer keeps the sentence and adds the link', async
   assert.match(body.connect.why, /not set up yet/);
 });
 
-test('an app never told where emseapea is builds no link at all', async () => {
+test('an app never told where emseapea is builds no link at all', () => {
   // A link that goes somewhere wrong is worse than no link: the person reports
   // a broken link instead of the missing configuration behind it.
+  //
+  // EMS-324 MOVED THIS OFF THE HANDLER, and the reason is worth reading rather
+  // than skipping. It used to drive `worker.fetch` with an env that had no
+  // `EMSEAPEA_URL`. Such an app can no longer reach the gateway at all — it has
+  // nowhere to check the viewer, so it refuses before it gets there — which
+  // means the route can no longer produce the answer this test is about. The
+  // subject is `noAccountAnswer`, so the subject is what it now calls.
   const message = 'You need a Microsoft 365 account to see this. Ask your IT team.';
-  stubGateway(() => jsonResponse({ ok: false, outcome: 'no_account', system: 'msgraph', message }));
-  const res = await worker.fetch(get('/me/google-files', { 'x-emseapea-person': PERSON }), ENV);
-  const body = await res.json();
+  const body = noAccountAnswer(
+    { ok: false, outcome: 'no_account', system: 'msgraph', message },
+    get('/me/google-files'),
+    WITHOUT_CONTROL_PLANE,
+  );
   assert.equal(body.message, message);
   assert.equal(body.connect, undefined);
   assert.ok(!JSON.stringify(body).includes('/api/connect/'), 'a half-built URL reached the answer');
+});
+
+test('and that app refuses rather than acting on a person it cannot check', async () => {
+  // The other half of what changed above, asserted rather than left implied.
+  stubGateway(() => jsonResponse({ files: [] }));
+  const res = await worker.fetch(
+    get('/me/google-files', { 'x-emseapea-person': PERSON }),
+    WITHOUT_CONTROL_PLANE,
+  );
+  assert.equal(res.status, 503);
+  assert.equal(calls.length, 0, 'a person nothing verified reached the gateway');
 });
 
 test('no link for a system a person cannot link themselves', () => {
