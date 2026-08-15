@@ -89,6 +89,10 @@ If a person has not signed in, a browser hitting `/me/google-files` is sent to
 sign in; anything else gets a 401. Neither ever falls back to calling as nobody
 in particular, and neither should anything you add.
 
+**Signing somebody in is not the same as keeping anybody out.** A session this
+app has not verified is a session nothing has verified — see **The front door**
+below, and read it before you serve anything.
+
 ### How it works, in the order it happens
 
 1. **Discovery.** The app asks
@@ -114,10 +118,10 @@ anything between requests is the person's own browser, so the token rides in a
 `__Host-`-prefixed `HttpOnly; Secure; SameSite=Lax` cookie on this app's own
 origin. What that costs:
 
-- **The cookie is not signed, and does not need to be.** A signature proves we
-  issued the value; the value is a bearer token emseapea validates on every
-  use, so a forged one is simply refused upstream. There is also no secret to
-  sign with — every variable this app gets is plain text.
+- **The cookie is not signed, and this app does not rely on it being
+  trustworthy.** A signature proves we issued the value, and there is no secret
+  to sign with in any case — every variable this app gets is plain text. What
+  replaces the signature is a check: see **The front door** below.
 - **The token is in the browser** for as long as it is valid (about an hour).
   `HttpOnly` keeps script out, `Secure` keeps it off plaintext HTTP, and
   `__Host-` stops a neighbouring host on the same parent domain writing it.
@@ -125,6 +129,58 @@ origin. What that costs:
   expires the person signs in again — one redirect, and one consent screen.
 - **No server-side session, so no way to end one from here** beyond clearing
   the cookie and revoking the token at sign-out.
+
+### The front door
+
+**`__Host-` and `HttpOnly` are instructions to a browser.** An HTTP client
+sends whatever cookie header it likes:
+
+```
+curl -H 'Cookie: __Host-emseapea_person=anything' https://<this app>/
+```
+
+Until recently that was a signed-in request as far as this app was concerned,
+and this README said the cookie needed no signature because *the value is a
+bearer token emseapea validates on every use*.
+
+**That sentence was true of one kind of app and was doing duty for another.** An
+app that reaches its system **as the signed-in person** forwards the token on
+every call, so the gateway refuses a forged one and the app gets its session
+checked for free. An app that reaches its system **through an account IT
+prepared** forwards nothing the gateway inspects — and it is the app that shows
+people organisation-wide data they cannot otherwise reach.
+
+So the app now asks emseapea. Before it treats anybody as signed in, it presents
+the token at the `userinfo_endpoint` named in emseapea's discovery document and
+gets back the person, or a `401`. That endpoint authenticates with **the token
+itself**, which is what makes it usable from an app with no client secret, and
+it is **not** the gateway — a check that needed the gateway would not be
+available to the app that most needs one.
+
+There are **three** answers, and keeping them apart is the point:
+
+| | |
+| -- | -- |
+| emseapea named a person | serve |
+| emseapea said `401` | refuse `401`, and clear the dead cookie |
+| nobody could be asked | refuse `503` |
+
+The last row is the one worth arguing about, so: *we could not check* is not
+*it is fine*. An app with no `EMSEAPEA_URL`, or one whose control plane is
+unreachable, does not act on a token — it still serves its front page and says
+what is missing. That is a change from how this app used to behave, and it is
+the change that closes the door.
+
+**Anonymous is not refused.** Presenting nothing is not the same as presenting
+something bad, and a door that 401'd everybody who presented nothing would
+refuse its own home page.
+
+`verifyViewer(request, env)` is the check and `refuseUnverified(seen)` is the
+policy, deliberately two functions: a route of yours can have a different policy
+without reimplementing the check. **The worked example verifies for itself even
+though the handler already did** — your first route will be a copy of it, and a
+copy that only checks because something else remembered to is a copy that stops
+checking the moment it is pasted somewhere new.
 
 ## "You need a … account to see this. Ask your IT team."
 

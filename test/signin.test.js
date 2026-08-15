@@ -39,8 +39,24 @@ const AUTHORIZE = 'https://endpoints.example/api/auth/mcp/authorize';
 const TOKEN = 'https://endpoints.example/api/auth/mcp/token';
 const REVOKE = 'https://endpoints.example/api/auth/oauth2/revoke';
 const DISCOVERY = 'https://control-plane.example/.well-known/oauth-authorization-server';
+/** EMS-324: where this app asks emseapea WHO a token belongs to, before it
+ *  treats anybody as signed in. On the same non-EMSEAPEA_URL host as the rest,
+ *  for the same reason — a derived path would fail every assertion here. */
+const USERINFO = 'https://endpoints.example/api/auth/mcp/userinfo';
 
 const TOKEN_FOR_THE_PERSON = 'placeholder-person-token-not-a-real-one';
+/** A token an agent or MCP client already held before it called this app. */
+const TOKEN_A_CALLER_BROUGHT = 'placeholder-caller-token-not-a-real-one';
+
+/**
+ * EMS-324: the two tokens emseapea recognises, and nothing else. A stub that
+ * said yes to any Bearer would let this suite go green with the front door
+ * taken out, which is the one thing it must not do.
+ */
+const PEOPLE_EMSEAPEA_KNOWS = {
+  [TOKEN_FOR_THE_PERSON]: { sub: 'usr_signed_in_here', email: 'signed-in@example.test' },
+  [TOKEN_A_CALLER_BROUGHT]: { sub: 'usr_the_caller', email: 'the-caller@example.test' },
+};
 const APP = 'https://app.example';
 const CALLBACK = `${APP}/auth/emseapea/callback`;
 
@@ -66,11 +82,22 @@ function stubControlPlane({ token = () => jsonResponse({ access_token: TOKEN_FOR
         authorization_endpoint: AUTHORIZE,
         token_endpoint: TOKEN,
         revocation_endpoint: REVOKE,
+        userinfo_endpoint: USERINFO,
         code_challenge_methods_supported: ['S256'],
       });
     }
     if (href === TOKEN) return token();
     if (href === REVOKE) return jsonResponse({});
+    /**
+     * EMS-324. Emseapea knows the token it issued above and nothing else — a
+     * real one behaves the same way, and a stub that said yes to everything
+     * would let this suite go green with the front door removed.
+     */
+    if (href === USERINFO) {
+      const bearer = (new Headers(init?.headers).get('authorization') ?? '').replace(/^Bearer /, '');
+      const who = PEOPLE_EMSEAPEA_KNOWS[bearer];
+      return who ? jsonResponse(who) : jsonResponse({ error: 'invalid_token' }, 401);
+    }
     if (href.startsWith('https://gateway.example/')) return jsonResponse({ files: [] });
     throw new Error(`unexpected fetch to ${href}`);
   };
@@ -287,13 +314,30 @@ test('the held token becomes X-Emseapea-Person on the gateway call', async () =>
 test('an inbound header still wins, so EMS-181 callers are unaffected', async () => {
   const res = await worker.fetch(
     get('/me/google-files', {
-      'x-emseapea-person': 'a-caller-that-already-held-one',
+      'x-emseapea-person': TOKEN_A_CALLER_BROUGHT,
       cookie: `__Host-emseapea_person=${TOKEN_FOR_THE_PERSON}`,
     }),
     ENV,
   );
   assert.equal(res.status, 200);
-  assert.equal(gatewayCalls()[0].headers.get('x-emseapea-person'), 'a-caller-that-already-held-one');
+  assert.equal(gatewayCalls()[0].headers.get('x-emseapea-person'), TOKEN_A_CALLER_BROUGHT);
+});
+
+test('EMS-324: and the header is checked too — precedence is not exemption', async () => {
+  // The header is the other way in, and an HTTP client sets it as easily as it
+  // sets a cookie. A fix that closed one and not the other would have closed
+  // the report and left the defect.
+  const res = await worker.fetch(
+    get('/me/google-files', {
+      'x-emseapea-person': 'a-token-emseapea-has-never-issued',
+      cookie: `__Host-emseapea_person=${TOKEN_FOR_THE_PERSON}`,
+    }),
+    ENV,
+  );
+  assert.equal(res.status, 401);
+  // Nor does it quietly fall back to the perfectly good cookie underneath it.
+  // A caller that named somebody gets an answer about the person it named.
+  assert.equal(gatewayCalls().length, 0);
 });
 
 test('a browser with no session is sent to sign in — and the gateway is NOT called', async () => {
@@ -365,13 +409,30 @@ test('its sign-in routes explain themselves rather than failing', async () => {
   assert.equal(calls.length, 0);
 });
 
-test('and it still relays a person token that arrives on the request', async () => {
+test('EMS-324: and it no longer relays a person token it has no way to check', async () => {
+  /**
+   * REVERSED, DELIBERATELY, and this is the one behaviour EMS-324 takes away.
+   *
+   * This test used to assert a 200 and the token going through to the gateway.
+   * An app with no `EMSEAPEA_URL` cannot ask emseapea whose that token is, and
+   * it cannot know whether anything downstream will ask either — for an app
+   * reaching its system through a prepared account, nothing will. So it stops,
+   * and says which configuration is missing rather than acting on a person
+   * nobody established.
+   *
+   * The cost is real and is not hidden: an app deployed without those variables
+   * that WAS relaying for a caller stops relaying. No such app can be deployed
+   * today — the deploy targets that would produce one cannot deploy a governed
+   * app at all — and *we could not check* must not read as *it is fine*.
+   */
   const res = await worker.fetch(
     get('/me/google-files', { 'x-emseapea-person': TOKEN_FOR_THE_PERSON }),
     ENV_WITHOUT_SIGNIN,
   );
-  assert.equal(res.status, 200);
-  assert.equal(gatewayCalls()[0].headers.get('x-emseapea-person'), TOKEN_FOR_THE_PERSON);
+  assert.equal(res.status, 503);
+  assert.match(await res.text(), /not given EMSEAPEA_URL/);
+  assert.equal(gatewayCalls().length, 0);
+  assert.equal(calls.length, 0, 'an app with no control plane address must not call one');
 });
 
 test('a browser on an unconfigured app is refused, never redirected into nothing', async () => {
