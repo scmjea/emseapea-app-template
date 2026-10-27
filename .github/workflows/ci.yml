@@ -47,15 +47,65 @@ jobs:
       # p/javascript, p/typescript and p/security-audit were evaluated and
       # rejected instead of this (docs/architecture.md D14, main repo).
       - run: semgrep scan --config p/default --config .semgrep/ --error
-  test:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      # Node's built-in test runner. No dependencies, nothing to install, and
-      # no lockfile for a governed app to inherit and then have to maintain.
-      # EMS-181: what these cover is the on-behalf-of contract — a request
-      # that does not say who is signed in must be REFUSED, not downgraded.
-      - run: node --test
+      # Whether this app is built, and where its output goes, is read from
+      # package.json: the same entry Emseapea reads at the same commit.
+      - name: Read whether the app is built
+        id: declared
+        run: |
+          node -e '
+            const fs = require("fs");
+            const say = (title, text) => { console.log("::error title=" + title + "::" + text); process.exit(1); };
+            const inside = (v) => typeof v === "string" && v !== "" && !v.startsWith("/") && !v.includes("\\") &&
+              !/[\r\n]/.test(v) && v.split("/").filter(Boolean).every((s) => s !== "." && s !== "..");
+            if (!fs.existsSync("package.json")) { console.log("This app is one file and is not built."); process.exit(0); }
+            let p;
+            try { p = JSON.parse(fs.readFileSync("package.json", "utf8")); }
+            catch (e) { say("package.json is not valid JSON", String(e.message)); }
+            const b = p && p.emseapea && p.emseapea.build;
+            if (!b) { console.log("This app is one file and is not built."); process.exit(0); }
+            if (!inside(b.output) || !inside(b.main))
+              say("The build is not described", "package.json needs emseapea.build.output, the folder the build writes, and emseapea.build.main, the file in it the app starts from.");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "output=" + b.output + "\n" + "main=" + b.main + "\n");
+          '
+      - name: Build the app
+        if: steps.declared.outputs.output != ''
+        env:
+          OUTPUT: ${{ steps.declared.outputs.output }}
+          MAIN: ${{ steps.declared.outputs.main }}
+        run: |
+          set -euo pipefail
+          if [ ! -f package-lock.json ]; then
+            echo "::error title=No lockfile::A built app installs its dependencies only from a committed package-lock.json, so exactly what is installed is decided by the code the checks passed. Commit package-lock.json."
+            exit 1
+          fi
+          # --ignore-scripts: no dependency runs code while it is being installed.
+          if ! npm ci --ignore-scripts --no-audit --no-fund; then
+            echo "::error title=The dependencies did not install::npm ci could not install exactly what package-lock.json lists. Its own output above says which package and why."
+            exit 1
+          fi
+          if ! npm run build; then
+            echo "::error title=The build command failed::npm run build did not finish. Its own output above says what went wrong."
+            exit 1
+          fi
+          if [ ! -f "$OUTPUT/$MAIN" ]; then
+            echo "::error title=The build wrote no starting file::The build finished without writing $OUTPUT/$MAIN, which package.json names as the file the app starts from."
+            exit 1
+          fi
+      - name: Keep the build for Emseapea
+        if: steps.declared.outputs.output != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: emseapea-app
+          path: ${{ steps.declared.outputs.output }}
+          if-no-files-found: error
