@@ -71,9 +71,11 @@ sign-in — the same kind an MCP client carries. The control plane rejects it if
 the person's organization is not the one this app's handle belongs to, so a
 borrowed token from another org buys nothing.
 
-1. **Your caller already holds one.** An agent or MCP client that has signed in
-   to emseapea sends its token to this app as `X-Emseapea-Person`. Forwarded
-   as-is; nothing to build.
+1. **Your caller already holds one issued to this app.** A caller that got a
+   token through this app's own sign-in sends it as `X-Emseapea-Person`.
+   Forwarded as-is; nothing to build. A token issued to anything else — an
+   assistant connected to emseapea, or another app — is refused at the front
+   door below.
 2. **This app signs the person in.** A browser has no such header, so the app
    runs the OAuth authorization-code + PKCE flow against emseapea itself and
    keeps the token for the session. Three routes, and none of them need
@@ -152,7 +154,10 @@ people organisation-wide data they cannot otherwise reach.
 
 So the app now asks emseapea. Before it treats anybody as signed in, it presents
 the token at the `userinfo_endpoint` named in emseapea's discovery document and
-gets back the person, or a `401`. That endpoint authenticates with **the token
+gets back the person, or a `401`. **It also checks the token was issued to this
+app:** userinfo's `client_id` must be this app's `EMSEAPEA_CLIENT_ID`. Without
+that, any live emseapea token — one an assistant got, or one another
+organisation's app holds — set as the cookie would be a signed-in visitor. That endpoint authenticates with **the token
 itself**, which is what makes it usable from an app with no client secret, and
 it is **not** the gateway — a check that needed the gateway would not be
 available to the app that most needs one.
@@ -161,9 +166,9 @@ There are **three** answers, and keeping them apart is the point:
 
 | | |
 | -- | -- |
-| emseapea named a person | serve |
-| emseapea said `401` | refuse `401`, and clear the dead cookie |
-| nobody could be asked | refuse `503` |
+| emseapea named a person, and `client_id` is this app's | serve |
+| emseapea said `401`, or `client_id` is another app's | refuse `401`, and clear the dead cookie |
+| nobody could be asked, or `client_id` is missing | refuse `503` |
 
 The last row is the one worth arguing about, so: *we could not check* is not
 *it is fine*. An app with no `EMSEAPEA_URL`, or one whose control plane is

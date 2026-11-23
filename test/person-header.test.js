@@ -59,7 +59,11 @@ function stubGateway(response) {
     }
     if (href === USERINFO) {
       return (headers.get('authorization') ?? '') === `Bearer ${PERSON}`
-        ? jsonResponse({ sub: 'usr_placeholder', email: 'someone@example.test' })
+        ? jsonResponse({
+            sub: 'usr_placeholder',
+            email: 'someone@example.test',
+            client_id: ENV.EMSEAPEA_CLIENT_ID,
+          })
         : jsonResponse({ error: 'invalid_token' }, 401);
     }
     calls.push({ url: href, headers });
