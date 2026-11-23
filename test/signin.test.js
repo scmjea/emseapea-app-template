@@ -54,8 +54,18 @@ const TOKEN_A_CALLER_BROUGHT = 'placeholder-caller-token-not-a-real-one';
  * taken out, which is the one thing it must not do.
  */
 const PEOPLE_EMSEAPEA_KNOWS = {
-  [TOKEN_FOR_THE_PERSON]: { sub: 'usr_signed_in_here', email: 'signed-in@example.test' },
-  [TOKEN_A_CALLER_BROUGHT]: { sub: 'usr_the_caller', email: 'the-caller@example.test' },
+  [TOKEN_FOR_THE_PERSON]: {
+    sub: 'usr_signed_in_here',
+    email: 'signed-in@example.test',
+    client_id: ENV.EMSEAPEA_CLIENT_ID,
+  },
+  // Issued to this app too: since D399 a token issued to anything else is
+  // refused, and that is proved in viewer.test.js.
+  [TOKEN_A_CALLER_BROUGHT]: {
+    sub: 'usr_the_caller',
+    email: 'the-caller@example.test',
+    client_id: ENV.EMSEAPEA_CLIENT_ID,
+  },
 };
 const APP = 'https://app.example';
 const CALLBACK = `${APP}/auth/emseapea/callback`;

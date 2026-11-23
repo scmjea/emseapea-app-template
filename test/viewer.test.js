@@ -51,7 +51,16 @@ const USERINFO = 'https://endpoints.example/api/auth/mcp/userinfo';
 
 const APP = 'https://app.example';
 const GOOD_TOKEN = 'placeholder-person-token-not-a-real-one';
-const A_REAL_PERSON = { sub: 'usr_placeholder', email: 'someone@example.test', name: 'Someone' };
+const A_REAL_PERSON = {
+  sub: 'usr_placeholder',
+  email: 'someone@example.test',
+  name: 'Someone',
+  client_id: ENV.EMSEAPEA_CLIENT_ID,
+};
+/** A live token for a real person, issued to a DIFFERENT client: an assistant
+ *  that connected itself, or another organisation's app (D399). */
+const ANOTHER_APPS_TOKEN = 'placeholder-token-issued-to-another-client';
+const SOMEBODY_ELSES_APP = { ...A_REAL_PERSON, client_id: 'emapp_somebody-elses-app' };
 
 let calls = [];
 const realFetch = globalThis.fetch;
@@ -65,7 +74,12 @@ const jsonResponse = (body, status = 200) =>
  * which is what a real one does.
  */
 function stubControlPlane({
-  userinfo = (token) => (token === GOOD_TOKEN ? jsonResponse(A_REAL_PERSON) : jsonResponse({ error: 'invalid_token' }, 401)),
+  userinfo = (token) =>
+    token === GOOD_TOKEN
+      ? jsonResponse(A_REAL_PERSON)
+      : token === ANOTHER_APPS_TOKEN
+        ? jsonResponse(SOMEBODY_ELSES_APP)
+        : jsonResponse({ error: 'invalid_token' }, 401),
   discovery = () =>
     jsonResponse({
       issuer: ENV.EMSEAPEA_URL,
@@ -242,4 +256,44 @@ test('the worked example verifies for itself when called on its own', async () =
   const res = await myGoogleFiles(get('/me/google-files', forged('anything')), ENV);
   assert.equal(res.status, 401);
   assert.equal(gatewayCalls().length, 0);
+});
+
+// ── D399: a token issued to another client is not a sign-in here ───────────
+
+test('D399: a live token issued to another app or an assistant is refused, and cleared', async () => {
+  const res = await worker.fetch(get('/', forged(ANOTHER_APPS_TOKEN)), ENV);
+  assert.equal(res.status, 401);
+  assert.match(res.headers.get('set-cookie') ?? '', /__Host-emseapea_person=;/);
+  assert.doesNotMatch(await res.text(), /Signed in to emseapea/);
+});
+
+test('D399: …and reaches no gateway, by header or by cookie', async () => {
+  for (const headers of [forged(ANOTHER_APPS_TOKEN), { 'x-emseapea-person': ANOTHER_APPS_TOKEN }]) {
+    const res = await worker.fetch(get('/me/google-files', headers), ENV);
+    assert.equal(res.status, 401);
+  }
+  assert.equal(gatewayCalls().length, 0, 'another client’s token reached the gateway');
+});
+
+test('D399: an emseapea that does not say which app a token is for is not a pass', async () => {
+  stubControlPlane({
+    userinfo: () => jsonResponse({ sub: A_REAL_PERSON.sub, email: A_REAL_PERSON.email }),
+  });
+  const seen = await verifyViewer(get('/', forged(GOOD_TOKEN)), ENV);
+  assert.equal(seen.outcome, 'cannot_check');
+  const res = await worker.fetch(get('/', forged(GOOD_TOKEN)), ENV);
+  assert.equal(res.status, 503);
+});
+
+test('D399: an app with no EMSEAPEA_CLIENT_ID cannot tell whose token it is, and refuses', async () => {
+  const { EMSEAPEA_CLIENT_ID: _omitted, ...withoutClientId } = ENV;
+  const seen = await verifyViewer(get('/', forged(GOOD_TOKEN)), withoutClientId);
+  assert.equal(seen.outcome, 'cannot_check');
+  assert.equal(calls.length, 0, 'asked emseapea with nothing to compare the answer with');
+});
+
+test('D399: this app’s own token is still verified, with the client it was issued to', async () => {
+  const seen = await verifyViewer(get('/', forged(GOOD_TOKEN)), ENV);
+  assert.equal(seen.outcome, 'verified');
+  assert.equal(seen.person.client_id, ENV.EMSEAPEA_CLIENT_ID);
 });

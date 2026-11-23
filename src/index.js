@@ -127,9 +127,17 @@
  * prepared account, so a check that needed the gateway would not be available
  * to the app that needs it most.
  *
+ * AND IT ASKS WHICH APP THE TOKEN WAS ISSUED TO. Userinfo names the person
+ * behind ANY live emseapea token — one an assistant got by connecting itself,
+ * one another organisation's app holds — so a person alone proves only that
+ * somebody somewhere signed in. Userinfo also answers `client_id`, the client
+ * the token was issued to, and a token is this app's only when that is this
+ * app's own `EMSEAPEA_CLIENT_ID`. Anything else is refused, exactly as a 401 is.
+ *
  * THREE ANSWERS, NOT TWO, and keeping them apart is the point:
  *
- *   verified      emseapea named a person. Serve.
+ *   verified      emseapea named a person, for a token issued to this app.
+ *                 Serve.
  *   refused       emseapea said the token is no good. Refuse, and clear the
  *                 cookie so the browser stops sending a dead one.
  *   cannot_check  nobody answered — this app has no EMSEAPEA_URL, or the
@@ -201,10 +209,10 @@ export function signInConfigured(env) {
  * that, and it is the only thing that may. This function used to be called
  * *"the signed-in person's token"*, which is how it came to be trusted.
  *
- * Header first so an agent or MCP client that already holds a token keeps
- * working exactly as it did before this app could sign anyone in — an explicit
- * caller saying who it is for should not be overruled by whoever last used a
- * browser here. A browser cannot set this header cross-origin, so there is no
+ * Header first so a caller that already holds a token issued to THIS app
+ * keeps working — an explicit caller saying who it is for should not be
+ * overruled by whoever last used a browser here. A token issued to anything
+ * else (an assistant, another app) is refused by `verifyViewer`. A browser cannot set this header cross-origin, so there is no
  * way for a third-party page to smuggle one in.
  */
 export function personTokenFrom(request) {
@@ -288,12 +296,15 @@ export async function discoverEndpoints(env, fetchImpl = fetch) {
  * a front door that a 500 opens.
  *
  *   anonymous     no token was presented at all.
- *   verified      emseapea named the person behind the token.
- *   refused       emseapea would not — expired, revoked, or never real.
- *   cannot_check  nobody could be asked.
+ *   verified      emseapea named the person behind a token issued to this app.
+ *   refused       emseapea would not — expired, revoked, or never real — or the
+ *                 token was issued to another app or to an assistant.
+ *   cannot_check  nobody could be asked, or emseapea did not say which app the
+ *                 token was issued to.
  *
- * `person` is emseapea's answer, unmodified: `sub`, `email`, `email_verified`
- * and `name`. It says WHO, and deliberately not what they may do — that is a
+ * `person` is emseapea's answer, unmodified: `sub`, `email`, `email_verified`,
+ * `name` and `client_id`, and the organisation the app belongs to under
+ * `https://emseapea.ai/org_id`. It says WHO, and deliberately not what they may do — that is a
  * different question with a different answer, and this app must not infer one
  * from the other.
  */
@@ -303,6 +314,10 @@ export async function verifyViewer(request, env, fetchImpl = fetch) {
   if (!env?.EMSEAPEA_URL) {
     // Nothing to ask. Not a verification that passed by default.
     return { outcome: 'cannot_check', why: 'this app was not given EMSEAPEA_URL' };
+  }
+  if (!env.EMSEAPEA_CLIENT_ID) {
+    // Nothing to compare the answer with, so no answer could make it ours.
+    return { outcome: 'cannot_check', why: 'this app was not given EMSEAPEA_CLIENT_ID' };
   }
   let endpoints;
   try {
@@ -330,6 +345,16 @@ export async function verifyViewer(request, env, fetchImpl = fetch) {
   const person = (await res.json().catch(() => undefined)) ?? {};
   if (!person.sub) {
     return { outcome: 'cannot_check', why: 'emseapea named nobody' };
+  }
+  // Was it issued to THIS app? An emseapea that does not say cannot be told
+  // apart from one saying "another app", and serving on that silence would be
+  // serving anybody's token: refuse, as `cannot_check`, without clearing the
+  // cookie. A different client is emseapea saying no, so it is `refused`.
+  if (typeof person.client_id !== 'string' || person.client_id === '') {
+    return { outcome: 'cannot_check', why: 'emseapea did not say which app the token was issued to' };
+  }
+  if (person.client_id !== String(env.EMSEAPEA_CLIENT_ID)) {
+    return { outcome: 'refused' };
   }
   return { outcome: 'verified', token, person };
 }
@@ -737,8 +762,8 @@ function refuseUnverified(seen) {
     return page(
       headers,
       401,
-      'That sign-in is no longer good. Emseapea does not recognise it — it may have expired, ' +
-        'been signed out, or never have been real.\n\n' +
+      'That sign-in is no longer good. Emseapea does not recognise it for this app — it may ' +
+        'have expired, been signed out, been made for another app, or never have been real.\n\n' +
         `GET ${SIGNIN_PATH} to sign in again.`,
     );
   }
